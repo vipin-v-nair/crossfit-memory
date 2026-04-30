@@ -1,0 +1,16 @@
+# Core ADK + Vertex AI
+google-cloud-aiplatform[agent_engines,adk]>=1.119.0
+google-adk>=1.18.0
+google-genai>=1.45.0
+
+# AG-UI bridge for ADK
+ag-ui-adk>=0.4.0
+
+# Web server
+fastapi>=0.118.0
+uvicorn[standard]>=0.36.0
+websockets>=14.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.10.0

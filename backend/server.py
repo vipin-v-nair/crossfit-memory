@@ -1,0 +1,204 @@
+"""
+FastAPI server exposing two routes:
+
+  POST /agent      — AG-UI / SSE endpoint for text chat (CopilotKit talks here)
+  WS   /voice      — Gemini Live API bidirectional voice (separate from AG-UI)
+  GET  /memories   — Inspect raw memories (debug/demo helper)
+
+The two agent-facing routes deliberately use different transports because
+AG-UI is SSE and Live API is WebSocket. Do not try to merge them.
+"""
+
+import os
+import json
+import asyncio
+import base64
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+import vertexai
+from google.adk.memory import VertexAiMemoryBankService
+from google.adk.sessions import VertexAiSessionService
+from google.adk.runners import Runner
+from google.genai import types
+
+from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
+
+from crossfit_coach import root_agent
+
+load_dotenv()
+
+PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
+LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+APP_NAME = os.environ.get("APP_NAME", "crossfit_memory_demo")
+DEFAULT_USER_ID = os.environ.get("DEFAULT_USER_ID", "demo_athlete")
+AGENT_ENGINE_ID = os.environ["AGENT_ENGINE_ID"]  # required
+
+# --- Shared services (real Memory Bank, real Sessions — NOT in-memory) -----
+
+vertex_client = vertexai.Client(project=PROJECT, location=LOCATION)
+
+memory_service = VertexAiMemoryBankService(
+    project=PROJECT,
+    location=LOCATION,
+    agent_engine_id=AGENT_ENGINE_ID,
+)
+
+session_service = VertexAiSessionService(
+    project=PROJECT,
+    location=LOCATION,
+    agent_engine_id=AGENT_ENGINE_ID,
+)
+
+# --- AG-UI middleware --------------------------------------------------------
+# IMPORTANT: use_in_memory_services=False is the whole point. The CopilotKit
+# scaffold defaults this to True for its proverbs demo; we override.
+adk_agent = ADKAgent(
+    adk_agent=root_agent,
+    app_name=APP_NAME,
+    user_id=DEFAULT_USER_ID,
+    session_timeout_seconds=3600,
+    use_in_memory_services=False,
+    session_service=session_service,
+    memory_service=memory_service,
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Place for warmup / shutdown logic if needed later.
+    yield
+
+
+app = FastAPI(title="CrossFit Memory Demo", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount the AG-UI endpoint at /agent — CopilotKit's runtime will POST here.
+add_adk_fastapi_endpoint(app, adk_agent, path="/agent")
+
+
+# --- Memory inspection endpoint (demo helper) -------------------------------
+@app.get("/memories")
+async def list_memories(user_id: str = DEFAULT_USER_ID):
+    """List the raw memories Memory Bank has extracted for a user.
+
+    Useful for the demo's 'Memory Inspector' panel — lets the audience see
+    Gemini's structured extractions in real time.
+    """
+    agent_engine = vertex_client.agent_engines.get(name=AGENT_ENGINE_ID)
+    memories = list(
+        agent_engine.list_memories(scope={"user_id": user_id})
+    )
+    return {
+        "user_id": user_id,
+        "count": len(memories),
+        "memories": [
+            {
+                "name": m.name,
+                "fact": m.fact,
+                "topic": getattr(m, "topic", None),
+                "create_time": str(getattr(m, "create_time", "")),
+                "update_time": str(getattr(m, "update_time", "")),
+            }
+            for m in memories
+        ],
+    }
+
+
+# --- Live API voice route (Phase 2) -----------------------------------------
+@app.websocket("/voice")
+async def voice_endpoint(ws: WebSocket):
+    """Bidirectional voice via Gemini Live API.
+
+    Client protocol (JSON over WebSocket):
+        {"type": "audio", "data": "<base64 PCM 16kHz mono>"}
+        {"type": "end_turn"}
+    Server emits:
+        {"type": "audio", "data": "<base64 PCM 24kHz mono>"}
+        {"type": "transcript", "text": "...", "role": "user"|"model"}
+        {"type": "turn_complete"}
+
+    This route shares the same ADK agent + Memory Bank as /agent, so anything
+    said via voice contributes to the same memory store as text chat.
+    """
+    await ws.accept()
+
+    runner = Runner(
+        app_name=APP_NAME,
+        agent=root_agent,
+        session_service=session_service,
+        memory_service=memory_service,
+    )
+
+    # One session per WebSocket connection
+    session = await session_service.create_session(
+        app_name=APP_NAME, user_id=DEFAULT_USER_ID
+    )
+
+    from google.adk.agents.run_config import RunConfig
+    from google.adk.agents import LiveRequestQueue
+
+    live_queue = LiveRequestQueue()
+    run_config = RunConfig(response_modalities=["AUDIO"])
+
+    async def upstream():
+        """Client -> Live API"""
+        try:
+            while True:
+                msg = await ws.receive_text()
+                payload = json.loads(msg)
+                if payload["type"] == "audio":
+                    pcm = base64.b64decode(payload["data"])
+                    live_queue.send_realtime(
+                        types.Blob(mime_type="audio/pcm;rate=16000", data=pcm)
+                    )
+                elif payload["type"] == "end_turn":
+                    live_queue.close()
+                    break
+        except WebSocketDisconnect:
+            live_queue.close()
+
+    async def downstream():
+        """Live API -> client"""
+        async for event in runner.run_live(
+            session=session, live_request_queue=live_queue, run_config=run_config
+        ):
+            for part in event.content.parts if event.content else []:
+                if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                    await ws.send_text(json.dumps({
+                        "type": "audio",
+                        "data": base64.b64encode(part.inline_data.data).decode(),
+                    }))
+                if part.text:
+                    role = event.content.role or "model"
+                    await ws.send_text(json.dumps({
+                        "type": "transcript",
+                        "text": part.text,
+                        "role": role,
+                    }))
+            if event.turn_complete:
+                await ws.send_text(json.dumps({"type": "turn_complete"}))
+
+    try:
+        await asyncio.gather(upstream(), downstream())
+    except Exception as e:
+        await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+    finally:
+        # Trigger memory extraction for the voice session too.
+        await memory_service.add_session_to_memory(session)
+        await ws.close()
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "agent_engine_id": AGENT_ENGINE_ID}
