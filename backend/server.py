@@ -129,10 +129,7 @@ async def list_memories(user_id: str = DEFAULT_USER_ID):
     """
     resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
     memories = list(
-        vertex_client.agent_engines.memories.list(
-            name=resource_name,
-            config={"scope": {"user_id": user_id}},
-        )
+        vertex_client.agent_engines.memories.list(name=resource_name)
     )
     return {
         "user_id": user_id,
@@ -242,3 +239,24 @@ async def voice_endpoint(ws: WebSocket):
 @app.get("/health")
 async def health():
     return {"status": "ok", "agent_engine_id": AGENT_ENGINE_ID}
+
+
+@app.get("/debug/memory")
+async def debug_memory():
+    """Quick check: can we reach Memory Bank and how many memories exist?"""
+    try:
+        resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
+        memories = list(
+            vertex_client.agent_engines.memories.list(name=resource_name)
+        )
+        return {
+            "status": "ok",
+            "agent_engine_id": AGENT_ENGINE_ID,
+            "memory_count": len(memories),
+            "sample": [
+                {"fact": m.fact, "topic": _extract_topic(m)}
+                for m in memories[:3]
+            ],
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
