@@ -127,9 +127,12 @@ async def list_memories(user_id: str = DEFAULT_USER_ID):
     Useful for the demo's 'Memory Inspector' panel — lets the audience see
     Gemini's structured extractions in real time.
     """
-    agent_engine = vertex_client.agent_engines.get(name=AGENT_ENGINE_ID)
+    resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
     memories = list(
-        agent_engine.list_memories(scope={"user_id": user_id})
+        vertex_client.agent_engines.memories.list(
+            name=resource_name,
+            config={"scope": {"user_id": user_id}},
+        )
     )
     return {
         "user_id": user_id,

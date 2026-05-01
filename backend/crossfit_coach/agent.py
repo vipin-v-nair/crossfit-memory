@@ -7,6 +7,7 @@ Wires together:
 - after_agent_callback (runs at turn end, ships the session to Memory Bank)
 """
 
+import logging
 import os
 from typing import Any
 
@@ -15,6 +16,8 @@ from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 from google.adk.agents.callback_context import CallbackContext
 
 from crossfit_coach.prompts import COACH_INSTRUCTION
+
+logger = logging.getLogger(__name__)
 
 
 async def persist_to_memory_bank(callback_context: CallbackContext) -> None:
@@ -28,13 +31,24 @@ async def persist_to_memory_bank(callback_context: CallbackContext) -> None:
     invocation = callback_context._invocation_context
     memory_service = invocation.memory_service
     if memory_service is None:
-        # Should not happen in production wiring, but be defensive.
+        logger.warning(
+            "persist_to_memory_bank: memory_service is None — "
+            "check that ADKAgent was created with use_in_memory_services=False "
+            "and a real VertexAiMemoryBankService."
+        )
         return
 
-    # add_session_to_memory enqueues async memory extraction in Memory Bank.
-    # The actual extraction happens in the background; results are searchable
-    # within ~10 seconds typically.
-    await memory_service.add_session_to_memory(invocation.session)
+    try:
+        logger.info(
+            "persist_to_memory_bank: saving session %s to Memory Bank",
+            invocation.session.id,
+        )
+        # add_session_to_memory enqueues async extraction in Memory Bank.
+        # Memories become searchable within ~10–30 seconds.
+        await memory_service.add_session_to_memory(invocation.session)
+        logger.info("persist_to_memory_bank: enqueued successfully")
+    except Exception:
+        logger.exception("persist_to_memory_bank: failed to enqueue session")
 
 
 root_agent = Agent(
