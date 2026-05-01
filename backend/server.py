@@ -261,3 +261,31 @@ async def debug_memory():
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@app.post("/debug/write-test-memory")
+async def write_test_memory():
+    """Directly write a test memory to verify the Memory Bank write path."""
+    try:
+        resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
+        vertex_client.agent_engines.memories.generate(
+            name=resource_name,
+            direct_memories_source={
+                "direct_memories": [
+                    {"fact": "Test memory written directly via debug endpoint."}
+                ]
+            },
+            scope={"user_id": DEFAULT_USER_ID},
+            config={"wait_for_completion": True},
+        )
+        # Read back to confirm
+        memories = list(
+            vertex_client.agent_engines.memories.list(name=resource_name)
+        )
+        return {
+            "status": "ok",
+            "memory_count_after_write": len(memories),
+            "sample": [{"fact": m.fact} for m in memories[:3]],
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
