@@ -68,10 +68,53 @@ adk_agent = ADKAgent(
 )
 
 
+_extracted_sessions: set[str] = set()
+
+
+async def _memory_extraction_loop() -> None:
+    """Background task: extract memories from recent sessions every 30 seconds.
+
+    The ADK after_agent_callback approach is unreliable — this loop is the
+    guaranteed path. It uses memories.generate() (immediate Gemini extraction)
+    rather than ingest_events() (which requires a trigger config to fire).
+    """
+    resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
+    while True:
+        await asyncio.sleep(30)
+        try:
+            result = await session_service.list_sessions(
+                app_name=APP_NAME, user_id=DEFAULT_USER_ID
+            )
+            for s in result.sessions or []:
+                if s.id in _extracted_sessions:
+                    continue
+                session = await session_service.get_session(
+                    app_name=APP_NAME,
+                    user_id=DEFAULT_USER_ID,
+                    session_id=s.id,
+                )
+                if not session or not session.events:
+                    continue
+                await memory_service.add_events_to_memory(
+                    app_name=APP_NAME,
+                    user_id=DEFAULT_USER_ID,
+                    events=session.events,
+                    custom_metadata={"wait_for_completion": False},
+                )
+                _extracted_sessions.add(s.id)
+                print(
+                    f"[MEMORY] extracted from session {s.id} ({len(session.events)} events)",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"[MEMORY] background extractor error: {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Place for warmup / shutdown logic if needed later.
+    task = asyncio.create_task(_memory_extraction_loop())
     yield
+    task.cancel()
 
 
 app = FastAPI(title="CrossFit Memory Demo", lifespan=lifespan)
