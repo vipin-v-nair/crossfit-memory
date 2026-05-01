@@ -87,6 +87,38 @@ app.add_middleware(
 add_adk_fastapi_endpoint(app, adk_agent, path="/agent")
 
 
+# Managed topic enum values from Memory Bank — used to classify topic_type.
+# All four managed topics provided by Memory Bank by default.
+_MANAGED_TOPICS = {
+    "USER_PERSONAL_INFO",
+    "USER_PREFERENCES",
+    "KEY_CONVERSATION_DETAILS",
+    "EXPLICIT_INSTRUCTIONS",
+}
+
+
+def _extract_topic(m) -> str | None:
+    """Extract the topic label from a Memory object.
+
+    The SDK may return topic data as a simple `topic` string (older path) or
+    as a `topics` list of MemoryTopicId objects (newer Pydantic path). Handle
+    both so we stay compatible across SDK versions.
+    """
+    topic = getattr(m, "topic", None)
+    if topic:
+        return str(topic)
+    topics = getattr(m, "topics", None)
+    if topics:
+        t = topics[0]
+        label = getattr(t, "custom_memory_topic_label", None)
+        if label:
+            return label
+        managed = getattr(t, "managed_memory_topic", None)
+        if managed:
+            return str(managed)
+    return None
+
+
 # --- Memory inspection endpoint (demo helper) -------------------------------
 @app.get("/memories")
 async def list_memories(user_id: str = DEFAULT_USER_ID):
@@ -106,7 +138,12 @@ async def list_memories(user_id: str = DEFAULT_USER_ID):
             {
                 "name": m.name,
                 "fact": m.fact,
-                "topic": getattr(m, "topic", None),
+                "topic": _extract_topic(m),
+                "topic_type": (
+                    "managed"
+                    if _extract_topic(m) in _MANAGED_TOPICS
+                    else "custom"
+                ),
                 "create_time": str(getattr(m, "create_time", "")),
                 "update_time": str(getattr(m, "update_time", "")),
             }
