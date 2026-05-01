@@ -152,7 +152,8 @@ function MemoryPanel() {
     let cancelled = false;
     const fetchMemories = async () => {
       try {
-        const r = await fetch("http://localhost:8000/memories");
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+        const r = await fetch(`${backendUrl}/memories`);
         const data = await r.json();
         if (!cancelled) setMemories(data.memories ?? []);
       } catch {
