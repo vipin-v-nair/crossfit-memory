@@ -28,35 +28,25 @@ async def persist_to_memory_bank(callback_context: CallbackContext) -> None:
     Without this callback, NO memories will ever get extracted. ADK does not
     auto-trigger memory generation — it must be wired here.
     """
+    print("[MEMORY] persist_to_memory_bank: callback fired", flush=True)
     invocation = callback_context._invocation_context
     memory_service = invocation.memory_service
     if memory_service is None:
-        logger.warning(
-            "persist_to_memory_bank: memory_service is None — "
-            "check that ADKAgent was created with use_in_memory_services=False "
-            "and a real VertexAiMemoryBankService."
-        )
+        print("[MEMORY] ERROR: memory_service is None — check ADKAgent wiring", flush=True)
         return
 
     try:
         session = invocation.session
-        logger.info(
-            "persist_to_memory_bank: triggering extraction for session %s (%d events)",
-            session.id,
-            len(session.events),
-        )
-        # Use add_events_to_memory with wait_for_completion in custom_metadata.
-        # This forces the ADK to use memories.generate() (immediate Gemini
-        # extraction) instead of ingest_events() (which requires a separate
-        # generation_trigger_config to fire and would otherwise buffer forever).
+        print(f"[MEMORY] triggering extraction for session {session.id} ({len(session.events)} events)", flush=True)
         await memory_service.add_events_to_memory(
             app_name=session.app_name,
             user_id=session.user_id,
             events=session.events,
             custom_metadata={"wait_for_completion": False},
         )
-        logger.info("persist_to_memory_bank: extraction triggered successfully")
-    except Exception:
+        print("[MEMORY] extraction triggered successfully", flush=True)
+    except Exception as e:
+        print(f"[MEMORY] extraction FAILED: {e}", flush=True)
         logger.exception("persist_to_memory_bank: extraction failed")
 
 
