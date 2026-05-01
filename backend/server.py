@@ -99,7 +99,7 @@ async def _memory_extraction_loop() -> None:
                     app_name=APP_NAME,
                     user_id=DEFAULT_USER_ID,
                     events=session.events,
-                    custom_metadata={"wait_for_completion": False},
+                    custom_metadata={"wait_for_completion": True},
                 )
                 _extracted_sessions.add(s.id)
                 print(

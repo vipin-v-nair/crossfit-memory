@@ -42,7 +42,7 @@ async def persist_to_memory_bank(callback_context: CallbackContext) -> None:
             app_name=session.app_name,
             user_id=session.user_id,
             events=session.events,
-            custom_metadata={"wait_for_completion": False},
+            custom_metadata={"wait_for_completion": True},
         )
         print("[MEMORY] extraction triggered successfully", flush=True)
     except Exception as e:
