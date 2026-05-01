@@ -88,6 +88,8 @@ def main() -> None:
 
     print(f"Creating Agent Engine instance in {PROJECT}/{LOCATION}...")
 
+    model_prefix = f"projects/{PROJECT}/locations/{LOCATION}/publishers/google/models"
+
     agent_engine = client.agent_engines.create(
         config={
             "display_name": "crossfit-memory-demo",
@@ -100,18 +102,18 @@ def main() -> None:
             "context_spec": {
                 "memory_bank_config": {
                     "generation_config": {
-                        "model": "gemini-2.5-flash",
+                        "model": f"{model_prefix}/gemini-2.5-flash",
                     },
                     "similarity_search_config": {
-                        "embedding_model": "text-embedding-005",
+                        "embedding_model": f"{model_prefix}/text-embedding-005",
                     },
                     "customization_configs": [
                         {
-                            "memory_topic": {
-                                "custom_memory_topic": topic,
-                            }
+                            "memory_topics": [
+                                {"custom_memory_topic": topic}
+                                for topic in CROSSFIT_MEMORY_TOPICS
+                            ],
                         }
-                        for topic in CROSSFIT_MEMORY_TOPICS
                     ],
                 }
             },

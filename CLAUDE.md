@@ -28,6 +28,10 @@ path, and a sleek-but-simple UI. Do not over-engineer.
 | Deploy target | **Agent Engine Runtime** on GCP | Native Memory Bank attachment |
 
 **Hard rules:**
+- Don’t assume. Don’t hide confusion. Surface tradeoffs.
+- Minimum code that solves the problem. Nothing speculative.
+- Touch only what you must. Clean up only your own mess.
+- Define success criteria. Loop until verified.
 - Do **not** swap out CopilotKit for a custom WebSocket chat UI. AG-UI is the
   point.
 - Do **not** put Live API voice traffic through the AG-UI endpoint. They're
