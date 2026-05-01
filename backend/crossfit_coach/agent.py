@@ -39,16 +39,25 @@ async def persist_to_memory_bank(callback_context: CallbackContext) -> None:
         return
 
     try:
+        session = invocation.session
         logger.info(
-            "persist_to_memory_bank: saving session %s to Memory Bank",
-            invocation.session.id,
+            "persist_to_memory_bank: triggering extraction for session %s (%d events)",
+            session.id,
+            len(session.events),
         )
-        # add_session_to_memory enqueues async extraction in Memory Bank.
-        # Memories become searchable within ~10–30 seconds.
-        await memory_service.add_session_to_memory(invocation.session)
-        logger.info("persist_to_memory_bank: enqueued successfully")
+        # Use add_events_to_memory with wait_for_completion in custom_metadata.
+        # This forces the ADK to use memories.generate() (immediate Gemini
+        # extraction) instead of ingest_events() (which requires a separate
+        # generation_trigger_config to fire and would otherwise buffer forever).
+        await memory_service.add_events_to_memory(
+            app_name=session.app_name,
+            user_id=session.user_id,
+            events=session.events,
+            custom_metadata={"wait_for_completion": False},
+        )
+        logger.info("persist_to_memory_bank: extraction triggered successfully")
     except Exception:
-        logger.exception("persist_to_memory_bank: failed to enqueue session")
+        logger.exception("persist_to_memory_bank: extraction failed")
 
 
 root_agent = Agent(
