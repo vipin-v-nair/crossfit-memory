@@ -140,13 +140,11 @@ _MANAGED_TOPICS = {
 def _extract_topic(m) -> str | None:
     """Extract the topic label from a Memory object.
 
-    The SDK may return topic data as a simple `topic` string (older path) or
-    as a `topics` list of MemoryTopicId objects (newer Pydantic path). Handle
-    both so we stay compatible across SDK versions.
+    custom_memory_topic_label is already a plain string.
+    managed_memory_topic is a ManagedTopicEnum — use .value to get the
+    raw string (e.g. "USER_PERSONAL_INFO"), not str() which returns
+    "ManagedTopicEnum.USER_PERSONAL_INFO".
     """
-    topic = getattr(m, "topic", None)
-    if topic:
-        return str(topic)
     topics = getattr(m, "topics", None)
     if topics:
         t = topics[0]
@@ -155,7 +153,11 @@ def _extract_topic(m) -> str | None:
             return label
         managed = getattr(t, "managed_memory_topic", None)
         if managed:
-            return str(managed)
+            return managed.value if hasattr(managed, "value") else str(managed)
+    # Fallback for older SDK paths that expose a plain `topic` string.
+    topic = getattr(m, "topic", None)
+    if topic:
+        return str(topic)
     return None
 
 
@@ -281,14 +283,6 @@ async def health():
     return {"status": "ok", "agent_engine_id": AGENT_ENGINE_ID}
 
 
-@app.get("/debug/raw-memories")
-async def raw_memories():
-    """Return the raw SDK representation of the first 3 memories to inspect topic fields."""
-    memories = list(vertex_client.agent_engines.memories.list(name=_FULL_RESOURCE_NAME))
-    return {
-        "count": len(memories),
-        "raw": [str(m) for m in memories[:3]],
-    }
 
 
 @app.get("/debug/memory")
