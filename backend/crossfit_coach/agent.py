@@ -19,17 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 async def persist_to_memory_bank(callback_context: CallbackContext) -> None:
-    """
-    After-turn callback: save the session to Memory Bank using the documented
-    ADK pattern — calling add_session_to_memory() directly on the callback
-    context, not through private _invocation_context APIs.
-    """
-    print("[MEMORY] callback fired", flush=True)
+    """Save the session to Memory Bank after each turn using the documented ADK pattern."""
     try:
         await callback_context.add_session_to_memory()
-        print("[MEMORY] add_session_to_memory completed", flush=True)
-    except Exception as e:
-        print(f"[MEMORY] add_session_to_memory failed: {e}", flush=True)
+    except Exception:
         logger.exception("persist_to_memory_bank failed")
 
 
