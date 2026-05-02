@@ -362,6 +362,45 @@ async def debug_extract_latest():
             "session_id": latest.id,
             "session_name": full_session_name,
             "done": op.done,
+            "error": str(getattr(op, "error", None)),
+            "generated_memories": generated,
+            "raw_response": str(op.response),
+            "full_op": str(op),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/debug/extract-direct")
+async def debug_extract_direct():
+    """Try generate() with direct_contents_source (hardcoded content) to test if
+    the Agent Engine's Memory Bank config can extract anything at all."""
+    try:
+        op = vertex_client.agent_engines.memories.generate(
+            name=_FULL_RESOURCE_NAME,
+            direct_contents_source={
+                "events": [
+                    {"content": {"role": "user", "parts": [
+                        {"text": "I am 34 years old and have been doing CrossFit for 3 years."}
+                    ]}},
+                    {"content": {"role": "model", "parts": [
+                        {"text": "Got it! I've noted that you're 34 and have 3 years of CrossFit experience."}
+                    ]}},
+                ]
+            },
+            scope={"user_id": DEFAULT_USER_ID},
+            config={"wait_for_completion": True},
+        )
+        generated = []
+        if op.response and hasattr(op.response, "generated_memories"):
+            for gm in op.response.generated_memories or []:
+                generated.append({
+                    "action": str(getattr(gm, "action", "?")),
+                    "fact": getattr(gm.memory, "fact", "?") if gm.memory else "?",
+                })
+        return {
+            "done": op.done,
+            "error": str(getattr(op, "error", None)),
             "generated_memories": generated,
             "raw_response": str(op.response),
         }
