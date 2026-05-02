@@ -302,6 +302,73 @@ async def debug_memory():
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/debug/sessions")
+async def debug_sessions():
+    """Inspect sessions and what events they contain."""
+    try:
+        result = await session_service.list_sessions(
+            app_name=APP_NAME, user_id=DEFAULT_USER_ID
+        )
+        sessions_info = []
+        for s in (result.sessions or [])[:5]:
+            session = await session_service.get_session(
+                app_name=APP_NAME, user_id=DEFAULT_USER_ID, session_id=s.id
+            )
+            events_summary = []
+            for e in (session.events if session else []):
+                content = e.content
+                if content and content.parts:
+                    for part in content.parts:
+                        if part.text:
+                            events_summary.append({
+                                "role": content.role,
+                                "text_preview": part.text[:100],
+                            })
+            sessions_info.append({
+                "id": s.id,
+                "event_count": len(session.events) if session else 0,
+                "text_events": events_summary,
+            })
+        return {"sessions": sessions_info}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/debug/extract-latest-session")
+async def debug_extract_latest():
+    """Run generate() on the latest session and return the full Memory Bank response."""
+    try:
+        result = await session_service.list_sessions(
+            app_name=APP_NAME, user_id=DEFAULT_USER_ID
+        )
+        if not result.sessions:
+            return {"status": "no sessions found"}
+        latest = result.sessions[0]
+        full_session_name = f"{_FULL_RESOURCE_NAME}/sessions/{latest.id}"
+        op = vertex_client.agent_engines.memories.generate(
+            name=_FULL_RESOURCE_NAME,
+            vertex_session_source={"session": full_session_name},
+            scope={"user_id": DEFAULT_USER_ID},
+            config={"wait_for_completion": True},
+        )
+        generated = []
+        if op.response and hasattr(op.response, "generated_memories"):
+            for gm in op.response.generated_memories or []:
+                generated.append({
+                    "action": str(getattr(gm, "action", "?")),
+                    "fact": getattr(gm.memory, "fact", "?") if gm.memory else "?",
+                })
+        return {
+            "session_id": latest.id,
+            "session_name": full_session_name,
+            "done": op.done,
+            "generated_memories": generated,
+            "raw_response": str(op.response),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 @app.post("/debug/write-test-memory")
 async def write_test_memory():
     """Directly write a test memory to verify the Memory Bank write path."""
