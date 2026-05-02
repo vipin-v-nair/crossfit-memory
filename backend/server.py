@@ -281,6 +281,16 @@ async def health():
     return {"status": "ok", "agent_engine_id": AGENT_ENGINE_ID}
 
 
+@app.get("/debug/raw-memories")
+async def raw_memories():
+    """Return the raw SDK representation of the first 3 memories to inspect topic fields."""
+    memories = list(vertex_client.agent_engines.memories.list(name=_FULL_RESOURCE_NAME))
+    return {
+        "count": len(memories),
+        "raw": [str(m) for m in memories[:3]],
+    }
+
+
 @app.get("/debug/memory")
 async def debug_memory():
     """Quick check: can we reach Memory Bank and how many memories exist?"""
