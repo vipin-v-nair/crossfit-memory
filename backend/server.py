@@ -70,15 +70,18 @@ adk_agent = ADKAgent(
 
 _extracted_sessions: set[str] = set()
 
+# Full resource name — required for all Vertex AI Memory Bank API calls.
+_FULL_RESOURCE_NAME = (
+    f"projects/{PROJECT}/locations/{LOCATION}/reasoningEngines/{AGENT_ENGINE_ID}"
+)
+
 
 async def _memory_extraction_loop() -> None:
     """Background task: extract memories from recent sessions every 30 seconds.
 
-    The ADK after_agent_callback approach is unreliable — this loop is the
-    guaranteed path. It uses memories.generate() (immediate Gemini extraction)
-    rather than ingest_events() (which requires a trigger config to fire).
+    Uses vertex_session_source so Memory Bank reads session events directly
+    from Vertex AI rather than us extracting and passing them manually.
     """
-    resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
     while True:
         await asyncio.sleep(30)
         try:
@@ -88,24 +91,17 @@ async def _memory_extraction_loop() -> None:
             for s in result.sessions or []:
                 if s.id in _extracted_sessions:
                     continue
-                session = await session_service.get_session(
-                    app_name=APP_NAME,
-                    user_id=DEFAULT_USER_ID,
-                    session_id=s.id,
+                full_session_name = (
+                    f"{_FULL_RESOURCE_NAME}/sessions/{s.id}"
                 )
-                if not session or not session.events:
-                    continue
-                await memory_service.add_events_to_memory(
-                    app_name=APP_NAME,
-                    user_id=DEFAULT_USER_ID,
-                    events=session.events,
-                    custom_metadata={"wait_for_completion": True},
+                vertex_client.agent_engines.memories.generate(
+                    name=_FULL_RESOURCE_NAME,
+                    vertex_session_source={"session": full_session_name},
+                    scope={"user_id": DEFAULT_USER_ID},
+                    config={"wait_for_completion": True},
                 )
                 _extracted_sessions.add(s.id)
-                print(
-                    f"[MEMORY] extracted from session {s.id} ({len(session.events)} events)",
-                    flush=True,
-                )
+                print(f"[MEMORY] extracted session {s.id}", flush=True)
         except Exception as e:
             print(f"[MEMORY] background extractor error: {e}", flush=True)
 
@@ -171,7 +167,7 @@ async def list_memories(user_id: str = DEFAULT_USER_ID):
     Useful for the demo's 'Memory Inspector' panel — lets the audience see
     Gemini's structured extractions in real time.
     """
-    resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
+    resource_name = _FULL_RESOURCE_NAME
     memories = list(
         vertex_client.agent_engines.memories.list(name=resource_name)
     )
@@ -289,7 +285,7 @@ async def health():
 async def debug_memory():
     """Quick check: can we reach Memory Bank and how many memories exist?"""
     try:
-        resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
+        resource_name = _FULL_RESOURCE_NAME
         memories = list(
             vertex_client.agent_engines.memories.list(name=resource_name)
         )
@@ -310,7 +306,7 @@ async def debug_memory():
 async def write_test_memory():
     """Directly write a test memory to verify the Memory Bank write path."""
     try:
-        resource_name = f"reasoningEngines/{AGENT_ENGINE_ID}"
+        resource_name = _FULL_RESOURCE_NAME
         vertex_client.agent_engines.memories.generate(
             name=resource_name,
             direct_memories_source={
