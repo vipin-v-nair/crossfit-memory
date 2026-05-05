@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { CopilotKit } from "@copilotkit/react-core";
 import { CopilotSidebar, CopilotChat } from "@copilotkit/react-ui";
 import "@copilotkit/react-ui/styles.css";
@@ -609,6 +609,10 @@ function AthleteProfileCard({ userId }: { userId: string }) {
   const fetchProfile = async () => {
     try {
       const r = await fetch(`/api/profile?user_id=${userId}`);
+      if (!r.ok) {
+        setLoading(false);
+        return;
+      }
       const data = await r.json();
       const athleteProfile = data.profiles?.athlete_profile?.profile || {};
       setProfile(athleteProfile);
@@ -1141,78 +1145,375 @@ function LoginPage({ onLogin }: { onLogin: (username: string, mode: "text" | "au
   );
 }
 
-// ── Audio-Visual Dummy Interface Component ───────────────────────────────────
-function AudioVisualDummyInterface({ username, isNewUser }: { username: string; isNewUser: boolean }) {
+// ── Real-time Audio-Visual Voice Interface ───────────────────────────────────
+function AudioVisualInterface({ username, isNewUser }: { username: string; isNewUser: boolean }) {
   const [isListening, setIsListening] = useState(false);
-  
+  const [transcripts, setTranscripts] = useState<{ role: "coach" | "athlete"; text: string }[]>([]);
+  const [partialUserSpeech, setPartialUserSpeech] = useState("");
+  const [activeCaption, setActiveCaption] = useState<{ role: "coach" | "athlete"; text: string } | null>(null);
+
+
+  const socketRef = useRef<WebSocket | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const nextPlayTimeRef = useRef<number>(0);
+  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const partialSpeechRef = useRef<string>("");
+
+  useEffect(() => {
+    if (transcriptEndRef.current) {
+      transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [transcripts, partialUserSpeech]);
+
+  const handleExportTranscript = () => {
+    if (transcripts.length === 0) return;
+    
+    const initialGreeting = isNewUser 
+      ? `Coach: Welcome to your CrossFit Athlete Portal, ${username}! I see you're a new athlete. Let's build your training profile! Speak to me about your age, body weight, experience, and active goals.`
+      : `Coach: Welcome back, ${username}! Let's continue your training. Speak to me about your latest WOD score or any new PRs.`;
+
+    const lines = [
+      initialGreeting,
+      ...transcripts.map((t) => `${t.role === "coach" ? "Coach" : "Athlete"}: ${t.text}`)
+    ];
+    
+    const blob = new Blob([lines.join("\n\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${username}-coaching-transcript.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+
+
+  // Resamples Float32Array from inputRate to outputRate (16000Hz)
+  const resampleAudio = (buffer: Float32Array, inputRate: number, outputRate: number = 16000): Float32Array => {
+    if (inputRate === outputRate) return buffer;
+    const ratio = inputRate / outputRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length) {
+      const nextOffset = Math.round((offsetResult + 1) * ratio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = count > 0 ? accum / count : 0;
+      offsetResult++;
+      offsetBuffer = nextOffset;
+    }
+    return result;
+  };
+
+  // Converts Float32Array to 16-bit PCM ArrayBuffer
+  const convertTo16BitPCM = (input: Float32Array): ArrayBuffer => {
+    const buffer = new ArrayBuffer(input.length * 2);
+    const view = new DataView(buffer);
+    let offset = 0;
+    for (let i = 0; i < input.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return buffer;
+  };
+
+  // Base64 encodes ArrayBuffer
+  const encodeBase64 = (buffer: ArrayBuffer): string => {
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  };
+
+  // Plays back 24kHz mono 16-bit PCM audio seamlessly
+  const playPCM24kHz = (base64Data: string) => {
+    if (!audioCtxRef.current) return;
+    const audioCtx = audioCtxRef.current;
+
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+
+    const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
+    audioBuffer.copyToChannel(float32, 0);
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+
+    const currentTime = audioCtx.currentTime;
+    if (nextPlayTimeRef.current < currentTime) {
+      nextPlayTimeRef.current = currentTime;
+    }
+    source.start(nextPlayTimeRef.current);
+    nextPlayTimeRef.current += audioBuffer.duration;
+  };
+
+  const stopRecording = () => {
+    setIsListening(false);
+    setPartialUserSpeech("");
+    setActiveCaption(null);
+
+    if (processorNodeRef.current) {
+      processorNodeRef.current.disconnect();
+      processorNodeRef.current = null;
+    }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+      micStreamRef.current = null;
+    }
+    if (socketRef.current) {
+      socketRef.current.close();
+      socketRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close();
+      audioCtxRef.current = null;
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtxRef.current = audioCtx;
+      nextPlayTimeRef.current = 0;
+
+      const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+      const wsProtocol = BACKEND_URL.startsWith("https") ? "wss" : "ws";
+      const cleanBackendHost = BACKEND_URL.replace(/^https?:\/\//, "");
+      const wsUrl = `${wsProtocol}://${cleanBackendHost}/voice?user_id=${username}`;
+
+      const ws = new WebSocket(wsUrl);
+      socketRef.current = ws;
+
+      ws.onopen = () => {
+        setIsListening(true);
+        console.log("[WS] Connected to Gemini Live voice endpoint");
+      };
+
+      ws.onmessage = (e) => {
+        const payload = JSON.parse(e.data);
+        if (payload.type === "audio") {
+          playPCM24kHz(payload.data);
+        } else if (payload.type === "transcript") {
+          const role = payload.role === "model" ? "coach" : "athlete";
+          if (role === "athlete") {
+            setPartialUserSpeech(payload.text);
+            partialSpeechRef.current = payload.text;
+            setActiveCaption({ role: "athlete", text: payload.text });
+          } else {
+            setTranscripts((prev) => {
+              const last = prev[prev.length - 1];
+              let newText = payload.text;
+              if (last && last.role === "coach") {
+                newText = last.text + payload.text;
+                setActiveCaption({ role: "coach", text: newText });
+                return [...prev.slice(0, -1), { role: "coach", text: newText }];
+              }
+              setActiveCaption({ role: "coach", text: newText });
+              return [...prev, { role: "coach", text: newText }];
+            });
+          }
+        } else if (payload.type === "turn_complete") {
+          if (partialSpeechRef.current) {
+            const speech = partialSpeechRef.current;
+            setTranscripts((prev) => [...prev, { role: "athlete", text: speech }]);
+            setPartialUserSpeech("");
+            partialSpeechRef.current = "";
+          }
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("[WS] Error:", err);
+        stopRecording();
+      };
+
+      ws.onclose = () => {
+        console.log("[WS] Connection closed");
+        stopRecording();
+      };
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      // Capture audio chunks using ScriptProcessor (1024 buffer size is standard)
+      const processor = audioCtx.createScriptProcessor(1024, 1, 1);
+      processorNodeRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        const resampled = resampleAudio(inputData, audioCtx.sampleRate, 16000);
+        const pcmBuffer = convertTo16BitPCM(resampled);
+        const base64Audio = encodeBase64(pcmBuffer);
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "audio", data: base64Audio }));
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    } catch (err) {
+      console.error("Microphone access denied or failed:", err);
+      stopRecording();
+    }
+  };
+
+  const handleToggleMic = () => {
+    if (isListening) {
+      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: "end_turn" }));
+      }
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopRecording();
+    };
+  }, []);
+
   return (
-    <div className="flex-1 flex flex-col bg-zinc-950 p-6 justify-between select-none">
+    <div className="flex-1 flex flex-col bg-zinc-950 p-6 justify-between select-none h-full">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-900 pb-4">
+      <div className="flex items-center justify-between border-b border-zinc-900 pb-4 flex-shrink-0">
         <div className="flex items-center gap-2">
           <span className="relative flex h-2 w-2">
-            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isListening ? "bg-emerald-400" : "bg-amber-400"} opacity-75`}></span>
+            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isListening ? "bg-emerald-400 animate-pulse" : "bg-amber-400"} opacity-75`}></span>
             <span className={`relative inline-flex rounded-full h-2 w-2 ${isListening ? "bg-emerald-500" : "bg-amber-500"}`}></span>
           </span>
           <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-400 font-mono">Audio-Visual Mode</h3>
         </div>
-        <span className="text-[8px] font-mono uppercase bg-zinc-900 border border-zinc-800 text-zinc-500 font-extrabold px-2 py-1 rounded tracking-widest">
-          Phase 2 Dummy
-        </span>
+        
+        <div className="flex items-center gap-2">
+          {transcripts.length > 0 && (
+            <button
+              onClick={handleExportTranscript}
+              className="text-[9px] uppercase font-mono bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-zinc-750 text-amber-400 hover:text-amber-300 font-bold px-2.5 py-1.5 rounded-lg tracking-widest transition active:scale-95 shadow-sm"
+            >
+              Export Transcript 📥
+            </button>
+          )}
+          <span className="text-[8px] font-mono uppercase bg-zinc-900 border border-zinc-800 text-emerald-400 font-extrabold px-2 py-1.5 rounded tracking-widest">
+            Gemini Live Active
+          </span>
+        </div>
       </div>
 
-      {/* Center Mic Visualization */}
-      <div className="flex-1 flex flex-col items-center justify-center space-y-6 my-8">
+      {/* Center Mic & Live Subtitle Captions */}
+      <div className="flex-1 flex flex-col items-center justify-center space-y-6 py-6 flex-shrink-0">
         <button
-          onClick={() => setIsListening(!isListening)}
-          className={`size-28 rounded-full flex items-center justify-center border transition-all duration-300 ${
+          onClick={handleToggleMic}
+          className={`size-24 rounded-full flex items-center justify-center border transition-all duration-300 ${
             isListening
-              ? "bg-emerald-500/10 border-emerald-500 text-emerald-400 shadow-lg shadow-emerald-500/10 scale-105"
+              ? "bg-emerald-500/10 border-emerald-500 text-emerald-400 shadow-lg shadow-emerald-500/20 scale-105 animate-pulse"
               : "bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-white"
           }`}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-10 h-10">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75v3.75m-3.75 0h7.5" />
           </svg>
         </button>
         
-        <div className="text-center space-y-1.5">
-          <p className="text-xs font-bold text-zinc-200 uppercase tracking-wider font-mono">
-            {isListening ? "Coach is listening..." : "Tap to start voice conversation"}
-          </p>
-          <p className="text-[9px] text-zinc-500 leading-relaxed max-w-xs font-medium">
-            Uses bidirectional Gemini Live API for real-time audio-visual coaching (Phase 2 implementation)
-          </p>
-        </div>
-      </div>
-
-      {/* Transcripts Block */}
-      <div className="border border-zinc-900 bg-zinc-900/20 rounded-xl p-4 space-y-3 max-h-[240px] overflow-y-auto scrollbar-thin">
-        <span className="text-[9px] uppercase font-extrabold text-zinc-500 tracking-widest font-mono">Live Transcript Log</span>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <span className="text-[8px] uppercase font-black text-amber-400 tracking-wider font-mono">Coach</span>
-            <p className="text-xs text-zinc-300 leading-relaxed bg-zinc-900/60 border border-zinc-850/40 rounded-xl p-3 font-semibold shadow-sm">
-              {isNewUser 
-                ? `👋 Welcome to your CrossFit Athlete Portal, ${username}! I see you're a new athlete. Let's build your training profile! Speak to me about your age, body weight, experience, and active goals.`
-                : `👋 Welcome back, ${username}! Let's continue your training. Speak to me about your latest WOD score or any new lift PRs.`
-              }
-            </p>
-          </div>
-          {isListening && (
-            <div className="space-y-1.5 animate-pulse">
-              <span className="text-[8px] uppercase font-black text-sky-400 tracking-wider font-mono">Athlete</span>
-              <p className="text-xs text-zinc-500 italic leading-relaxed bg-zinc-900/30 border border-dashed border-zinc-850/40 rounded-xl p-3 font-bold">
-                [User is speaking... Transcript will appear here in real time]
+        {/* Unified Real-time Subtitle Captions Box */}
+        <div className="text-center max-w-md min-h-[70px] flex flex-col justify-center px-4 my-2 border border-zinc-900/40 bg-zinc-900/10 rounded-2xl p-3">
+          {activeCaption ? (
+            <div className="space-y-1">
+              <span className={`text-[8px] uppercase font-black tracking-widest font-mono ${
+                activeCaption.role === "coach" ? "text-amber-400 animate-pulse" : "text-sky-400 animate-pulse"
+              }`}>
+                {activeCaption.role === "coach" ? "Coach Speaking" : "Athlete Speaking"}
+              </span>
+              <p className={`text-sm font-bold leading-relaxed ${
+                activeCaption.role === "coach" ? "text-amber-200" : "text-sky-200"
+              }`}>
+                "{activeCaption.text}"
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <span className="text-[8px] uppercase font-black tracking-widest text-zinc-600 font-mono">Coaching HUD</span>
+              <p className="text-xs font-semibold text-zinc-500 italic">
+                {isListening ? "[Listening... Speak naturally into your microphone]" : "[Voice assistant standby. Tap mic to speak]"}
               </p>
             </div>
           )}
         </div>
       </div>
+
+      {/* Neat Transcripts Chat Log */}
+      <div className="border border-zinc-900 bg-zinc-900/20 rounded-xl p-4 flex flex-col space-y-3 h-[220px] overflow-hidden flex-shrink-0">
+        <span className="text-[9px] uppercase font-extrabold text-zinc-500 tracking-widest font-mono border-b border-zinc-900 pb-1.5">
+          Conversation Log
+        </span>
+        
+        <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin flex flex-col">
+          {/* Initial Coach Greeting */}
+          <div className="max-w-[85%] self-start flex flex-col gap-1">
+            <span className="text-[7px] uppercase font-black text-amber-400 tracking-wider font-mono">Coach</span>
+            <div className="text-xs text-zinc-300 leading-relaxed bg-zinc-900/80 border border-zinc-800 rounded-2xl rounded-tl-none px-3.5 py-2 font-semibold shadow-sm">
+              {isNewUser 
+                ? `Welcome to your CrossFit Athlete Portal, ${username}! I see you're a new athlete. Let's build your training profile! Speak to me about your age, body weight, experience, and active goals.`
+                : `Welcome back, ${username}! Let's continue your training. Speak to me about your latest WOD score or any new lift PRs.`
+              }
+            </div>
+          </div>
+          
+          {/* Dynamic bubbles */}
+          {transcripts.map((t, idx) => {
+            const isCoach = t.role === "coach";
+            return (
+              <div 
+                key={idx} 
+                className={`max-w-[85%] flex flex-col gap-1 ${isCoach ? "self-start" : "self-end items-end"}`}
+              >
+                <span className={`text-[7px] uppercase font-black tracking-wider font-mono ${isCoach ? "text-amber-400" : "text-sky-400"}`}>
+                  {isCoach ? "Coach" : "Athlete"}
+                </span>
+                <div className={`text-xs leading-relaxed px-3.5 py-2 font-semibold shadow-sm border rounded-2xl ${
+                  isCoach 
+                    ? "bg-zinc-900/80 border-zinc-800 text-zinc-300 rounded-tl-none" 
+                    : "bg-sky-950/30 border-sky-800/30 text-sky-200 rounded-tr-none"
+                }`}>
+                  {t.text}
+                </div>
+              </div>
+            );
+          })}
+
+          <div ref={transcriptEndRef} />
+        </div>
+      </div>
     </div>
   );
 }
+
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function Page() {
@@ -1257,6 +1558,10 @@ export default function Page() {
     const checkProfile = async () => {
       try {
         const r = await fetch(`/api/profile?user_id=${activeUserId}`);
+        if (!r.ok) {
+          setIsNewUser(true);
+          return;
+        }
         const data = await r.json();
         const profile = data.profiles?.athlete_profile?.profile || {};
         setIsNewUser(Object.keys(profile).length === 0);
@@ -1352,7 +1657,7 @@ export default function Page() {
                   }}
                 />
               ) : (
-                <AudioVisualDummyInterface 
+                <AudioVisualInterface 
                   username={activeUserId} 
                   isNewUser={isNewUser} 
                 />

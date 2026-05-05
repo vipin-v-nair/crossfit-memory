@@ -15,6 +15,13 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager
 
+# Programmatically clear conflicting GOOGLE_APPLICATION_CREDENTIALS service account
+# to let the SDK fall back to your active local gcloud credentials seamlessly!
+if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+    print(f"[STARTUP] Clearing conflicting GOOGLE_APPLICATION_CREDENTIALS ({os.environ['GOOGLE_APPLICATION_CREDENTIALS']}) to enforce active gcloud ADC.", flush=True)
+    del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +37,20 @@ from google.genai import types
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 
 from crossfit_coach import root_agent
+from google.adk.agents import Agent
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
+from crossfit_coach.agent import persist_to_memory_bank
+from crossfit_coach.prompts import COACH_INSTRUCTION
+
+live_agent = Agent(
+    name="crossfit_coach_live",
+    model="gemini-live-2.5-flash-native-audio",
+    description=root_agent.description,
+    instruction=root_agent.instruction,
+    tools=[PreloadMemoryTool()],
+    after_agent_callback=persist_to_memory_bank,
+)
+
 
 load_dotenv()
 
@@ -318,9 +339,9 @@ async def get_athlete_profile(user_id: str = DEFAULT_USER_ID):
             scope={"user_id": user_id}
         )
         
-        profiles = response.profiles
+        profiles = response.profiles or {}
         athlete_profile_obj = profiles.get("athlete_profile")
-        if athlete_profile_obj and not getattr(athlete_profile_obj, "profile", {}):
+        if not athlete_profile_obj or not getattr(athlete_profile_obj, "profile", {}):
             # Fallback: manually consolidate structured memories for this user
             all_memories = list(
                 vertex_client.agent_engines.memories.list(name=_FULL_RESOURCE_NAME)
@@ -335,7 +356,7 @@ async def get_athlete_profile(user_id: str = DEFAULT_USER_ID):
                         consolidated_profile.update(sc.get("data"))
             
             if consolidated_profile:
-                athlete_profile_obj.profile = consolidated_profile
+                profiles["athlete_profile"] = {"profile": consolidated_profile}
                 print(f"[PROFILE FALLBACK] Successfully consolidated structured properties: {consolidated_profile}", flush=True)
 
         return {
@@ -415,21 +436,29 @@ async def voice_endpoint(ws: WebSocket):
 
     runner = Runner(
         app_name=APP_NAME,
-        agent=root_agent,
+        agent=live_agent,
         session_service=session_service,
         memory_service=memory_service,
     )
 
+    user_id = ws.query_params.get("user_id", DEFAULT_USER_ID)
+    _active_users.add(user_id)
+
     # One session per WebSocket connection
     session = await session_service.create_session(
-        app_name=APP_NAME, user_id=DEFAULT_USER_ID
+        app_name=APP_NAME, user_id=user_id
     )
+
 
     from google.adk.agents.run_config import RunConfig
     from google.adk.agents import LiveRequestQueue
 
     live_queue = LiveRequestQueue()
-    run_config = RunConfig(response_modalities=["AUDIO"])
+    run_config = RunConfig(
+        response_modalities=["AUDIO"],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig()
+    )
 
     async def upstream():
         """Client -> Live API"""
@@ -450,9 +479,45 @@ async def voice_endpoint(ws: WebSocket):
 
     async def downstream():
         """Live API -> client"""
+        accumulated_coach_text = ""
         async for event in runner.run_live(
             session=session, live_request_queue=live_queue, run_config=run_config
         ):
+            # 1. Stream and save user/athlete transcripts
+            input_transcription = getattr(event, "input_transcription", None)
+            if input_transcription and event.partial is not True:
+                text = getattr(input_transcription, "text", None)
+                if text:
+                    await ws.send_text(json.dumps({
+                        "type": "transcript",
+                        "text": text,
+                        "role": "user"
+                    }))
+                    try:
+                        from google.adk.events.event import Event as AdkEvent
+                        await session_service.append_event(
+                            session=session,
+                            event=AdkEvent(
+                                invocation_id=session.id,
+                                author="user",
+                                content=types.Content(parts=[types.Part(text=text)])
+                            )
+                        )
+                    except Exception as err:
+                        print(f"[SESSION SAVE ERROR] User transcript: {err}", flush=True)
+
+            # 2. Stream coach transcripts
+            output_transcription = getattr(event, "output_transcription", None)
+            if output_transcription:
+                text = getattr(output_transcription, "text", None)
+                if text:
+                    await ws.send_text(json.dumps({
+                        "type": "transcript",
+                        "text": text,
+                        "role": "model"
+                    }))
+
+            # 3. Audio chunk and fallback parts
             for part in event.content.parts if event.content else []:
                 if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
                     await ws.send_text(json.dumps({
@@ -466,17 +531,70 @@ async def voice_endpoint(ws: WebSocket):
                         "text": part.text,
                         "role": role,
                     }))
+                    if role == "model":
+                        accumulated_coach_text += part.text
+
             if event.turn_complete:
+                if accumulated_coach_text:
+                    try:
+                        from google.adk.events.event import Event as AdkEvent
+                        await session_service.append_event(
+                            session=session,
+                            event=AdkEvent(
+                                invocation_id=session.id,
+                                author="model",
+                                content=types.Content(parts=[types.Part(text=accumulated_coach_text)])
+                            )
+                        )
+                    except Exception as err:
+                        print(f"[SESSION SAVE ERROR] Coach transcript: {err}", flush=True)
+                    accumulated_coach_text = ""
+                
+                # Trigger memory extraction in the background IMMEDIATELY on turn completion!
+                try:
+                    full_session_name = f"{_FULL_RESOURCE_NAME}/sessions/{session.id}"
+                    vertex_client.agent_engines.memories.generate(
+                        name=_FULL_RESOURCE_NAME,
+                        vertex_session_source={"session": full_session_name},
+                        scope={"user_id": user_id},
+                        config={"wait_for_completion": False},
+                    )
+                    print(f"[MEMORY] Triggered turn-level voice extraction for {user_id}", flush=True)
+                except Exception as err:
+                    print(f"[MEMORY ERROR] Failed turn-level voice trigger: {err}", flush=True)
+                    
                 await ws.send_text(json.dumps({"type": "turn_complete"}))
 
     try:
         await asyncio.gather(upstream(), downstream())
+    except WebSocketDisconnect:
+        pass
     except Exception as e:
-        await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+        print(f"[WS ERROR] {e}", flush=True)
+        try:
+            await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+        except Exception:
+            pass
     finally:
         # Trigger memory extraction for the voice session too.
         await memory_service.add_session_to_memory(session)
-        await ws.close()
+        try:
+            full_session_name = f"{_FULL_RESOURCE_NAME}/sessions/{session.id}"
+            vertex_client.agent_engines.memories.generate(
+                name=_FULL_RESOURCE_NAME,
+                vertex_session_source={"session": full_session_name},
+                scope={"user_id": user_id},
+                config={"wait_for_completion": False},
+            )
+            _extracted_sessions.add(session.id)
+            print(f"[MEMORY] Manually triggered voice session extraction: {session.id} for {user_id}", flush=True)
+        except Exception as e:
+            print(f"[MEMORY] Failed manual voice extraction trigger: {e}", flush=True)
+            
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 @app.get("/health")
