@@ -31,19 +31,6 @@ LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 # here AND what should be excluded to avoid boundary misclassification.
 CROSSFIT_MEMORY_TOPICS = [
     {
-        "label": "personal_records",
-        "description": (
-            "Personal records (PRs) the user has explicitly set on lifts or named "
-            "benchmark workouts. Capture: exercise/movement name, weight (with unit "
-            "kg or lb), rep count, time (for benchmark WODs like Fran, Cindy, Helen), "
-            "date, and whether RX or scaled. "
-            "Examples: '405 lb back squat 1RM', '3:42 Fran RX', '12 strict pull-ups'. "
-            "Always preserve units. Do not infer PRs the user did not explicitly state. "
-            "Do NOT include here: general workout session results that are not stated "
-            "as PRs, recurring events, or physical condition notes."
-        ),
-    },
-    {
         "label": "workout_results",
         "description": (
             "Results from individual workout sessions. Capture: WOD name "
@@ -51,9 +38,7 @@ CROSSFIT_MEMORY_TOPICS = [
             "score (time for 'for time' WODs, rounds+reps for AMRAPs, weight for "
             "lifts), RX or scaled, date, and subjective notes the user mentioned "
             "(felt strong, pacing was off, etc.). One memory per workout session. "
-            "Do NOT include here: general fatigue or soreness unrelated to a specific "
-            "session, skill assessments ('my double-unders are bad'), or injury "
-            "reports — those belong in physical_state."
+            "Do NOT include here: general strength 1RMs, goals, or injuries — those belong in the profile."
         ),
     },
     {
@@ -63,36 +48,7 @@ CROSSFIT_MEMORY_TOPICS = [
             "Examples: 'follows CompTrain Masters', 'runs 5/3/1 on Mon/Thu', "
             "'does Murph every Memorial Day'. Capture: program name, "
             "schedule/cadence, and any user-stated goals for the program. "
-            "Key signal: phrases like 'I always do X', 'every Y I do Z', "
-            "'I follow program X'. Even if a specific result is mentioned alongside "
-            "the routine (e.g., 'I do Murph every Memorial Day — this year 55 min'), "
-            "capture the routine pattern here; also log the result in workout_results."
-        ),
-    },
-    {
-        "label": "physical_state",
-        "description": (
-            "Current and recent physical condition — specifically injuries, mobility "
-            "limitations, soreness patterns, recovery status, and movements the user "
-            "is avoiding or modifying due to physical issues. "
-            "Examples: 'tweaked left shoulder on overhead press', 'knee flares on "
-            "box jumps', 'still recovering from calf strain'. "
-            "Do NOT include here: general workout fatigue ('felt drained after "
-            "pull-ups'), performance feelings during a session, skill gaps "
-            "('my sit-ups are bad'), or post-workout feelings that are not "
-            "injury/recovery related — those belong in workout_results."
-        ),
-    },
-    {
-        "label": "goals",
-        "description": (
-            "Active training goals the user is working toward. Examples: "
-            "'first ring muscle-up by summer', 'sub-3:00 Fran', '500 lb deadlift', "
-            "'compete at local sanctional'. Capture: goal, target metric, and "
-            "timeline if mentioned. Mark goals as achieved when the user reports "
-            "hitting them. "
-            "Key signal: future tense, 'I want to', 'I'm working toward', 'my goal "
-            "is'. Do NOT include here: past achievements — those are personal_records."
+            "Do NOT include here: specific single-session scores or raw PRs."
         ),
     },
 ]
@@ -108,8 +64,139 @@ MANAGED_MEMORY_TOPICS = [
     "EXPLICIT_INSTRUCTIONS",    # things the user explicitly asked to remember or forget
 ]
 
+# CrossFit Athlete Profile Schema for structured Memory Profiles.
+# Gemini will automatically parse session events to extract and populate
+# these specific structured fields scoped to the user.
+CROSSFIT_PROFILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "The athlete's name or nickname."
+        },
+        "age": {
+            "type": "integer",
+            "description": "The athlete's current age in years."
+        },
+        "weight_lbs": {
+            "type": "integer",
+            "description": "The athlete's current body weight in pounds."
+        },
+        "experience_years": {
+            "type": "integer",
+            "description": "How many years the athlete has been training in CrossFit."
+        },
+        "back_squat_1rm_lbs": {
+            "type": "integer",
+            "description": "The athlete's 1-repetition maximum (1RM) back squat in pounds."
+        },
+        "deadlift_1rm_lbs": {
+            "type": "integer",
+            "description": "The athlete's 1-repetition maximum (1RM) deadlift in pounds."
+        },
+        "clean_jerk_1rm_lbs": {
+            "type": "integer",
+            "description": "The athlete's 1-repetition maximum (1RM) clean & jerk in pounds."
+        },
+        "snatch_1rm_lbs": {
+            "type": "integer",
+            "description": "The athlete's 1-repetition maximum (1RM) full or power snatch in pounds."
+        },
+        "bench_press_1rm_lbs": {
+            "type": "integer",
+            "description": "The athlete's 1-repetition maximum (1RM) bench press in pounds."
+        },
+        "fran_pr": {
+            "type": "string",
+            "description": "The athlete's best time for the 'Fran' benchmark WOD (e.g. '3:42 RX' or '4:15 scaled')."
+        },
+        "training_routine": {
+            "type": "object",
+            "properties": {
+                "program_name": {
+                    "type": "string",
+                    "description": "The name of the training program followed (e.g. 'CompTrain', 'Mayhem')."
+                },
+                "frequency": {
+                    "type": "string",
+                    "description": "How many days/week or training split schedule."
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "Primary active focus (e.g. 'Strength', 'Cardio endurance', 'Gymnastics skills')."
+                }
+            },
+            "description": "Active training program split and focus details."
+        },
+        "recent_workouts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "wod_name": {
+                        "type": "string",
+                        "description": "WOD name or short custom session description."
+                    },
+                    "score": {
+                        "type": "string",
+                        "description": "Score achieved (time, rounds, reps). Always preserve units."
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Date performed."
+                    },
+                    "feeling": {
+                        "type": "string",
+                        "description": "Subjective session pacing or energy notes."
+                    }
+                },
+                "required": ["wod_name", "score"]
+            },
+            "description": "Log of recent individual workout sessions performed by the athlete."
+        },
+        "other_prs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of movement or named benchmark WOD (e.g. 'Grace', '500m Row', 'Strict Pull-ups')."
+                    },
+                    "score": {
+                        "type": "string",
+                        "description": "Personal record score. Always preserve units."
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Date achieved."
+                    }
+                },
+                "required": ["name", "score"]
+            },
+            "description": "Personal records for other movements or benchmark workouts not in core lifts."
+        },
+        "active_goals": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Active training goals the athlete is currently working toward."
+        },
+        "physical_limitations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Active injuries, joint pain, or mobility limits the athlete is managing."
+        },
+        "featured_metrics": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of metric keys the athlete wants featured as core in their dashboard (e.g. ['back_squat_1rm_lbs', 'bench_press_1rm_lbs'])."
+        }
+    }
+}
+
 
 def main() -> None:
+
     client = vertexai.Client(project=PROJECT, location=LOCATION)
 
     print(f"Creating Agent Engine instance in {PROJECT}/{LOCATION}...")
@@ -144,6 +231,16 @@ def main() -> None:
                                     for t in MANAGED_MEMORY_TOPICS
                                 ]
                             ),
+                        }
+                    ],
+                    "structured_memory_configs": [
+                        {
+                            "schema_configs": [
+                                {
+                                    "id": "athlete_profile",
+                                    "memory_schema": CROSSFIT_PROFILE_SCHEMA
+                                }
+                            ]
                         }
                     ],
                 }

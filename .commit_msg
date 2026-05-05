@@ -1,0 +1,10 @@
+Fix Vertex AI Memory Bank and frontend integration bugs
+
+- Correct GET /memories to use full resource name with reasoningEngines in path, matching SDK expectations.
+- Update GET /memories to use direct list call on vertex_client.agent_engines.memories instead of getting the engine object first.
+- Fix hardcoded backend URL in frontend page UI to use NEXT_PUBLIC_BACKEND_URL env var with fallback.
+- Include debugging utilities list_agent_engines.py and check_agent_engine_exact.py.
+- Add openai dependency to frontend package.json.
+
+TAG=agy
+CONV=1fbc54db-557c-46db-9b0d-5558b29226be
